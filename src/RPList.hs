@@ -1,7 +1,7 @@
+{-# LANGUAGE Safe #-}
 import Control.Concurrent.MVar (takeMVar)
-import Control.Monad (forM, replicateM)
+import Control.Monad (forM_, replicateM)
 import Data.List (group, intercalate)
-import Debug.Trace (trace)
 
 import RP ( RP, RPE, RPR, RPW, runRP, forkRP, threadDelayRP, readRP, writeRP
           , SRef, readSRef, writeSRef, newSRef )
@@ -40,17 +40,14 @@ main :: IO ()
 main = do 
   (rvtids, wv) <- runRP $ do
     rl      <- testList
-    -- 8 readers each record 50 snapshots of the list
-    rvtids  <- replicateM 8 $ forkRP $ readRP $ replicateM 50000 $ reader rl
-    -- give the readers some time to observe the original version
-    threadDelayRP 300
+    -- spawn 8 readers, each records 100000 snapshots of the list
+    rvtids  <- replicateM 8 $ forkRP $ readRP $ replicateM 100000 $ reader rl
     -- spawn a writer to delete the middle node
     (wv, _) <- forkRP $ writeRP $ deleteMiddle rl
     return (rvtids, wv)
   -- wait for the readers to finish and print snapshots
-  snaps <- forM rvtids $ \(rv, tid) -> do 
+  forM_ rvtids $ \(rv, tid) -> do 
     v <- takeMVar rv
     putStrLn $ show tid ++ ": " ++ compactShow v
   -- wait for the writer to finish
   takeMVar wv
-  return ()
