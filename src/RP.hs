@@ -8,7 +8,7 @@ module RP
 
 import Control.Concurrent (ThreadId, forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar(..), newEmptyMVar, putMVar)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 
 -- Relativistic programming monads
 newtype RP  a = UnsafeRP  { runRP  :: IO a } 
@@ -67,7 +67,8 @@ writeRP = UnsafeRPE . runRPW
 
 -- | Swap the new version into the reference cell.
 writeSRef :: SRef a -> a -> RPW ()
-writeSRef r x = updateSRef r $ const x
+--writeSRef r x = updateSRef r $ const x
+writeSRef (SRef r) x = UnsafeRPW $ writeIORef r x
 
 -- | Compute an update and swap it into the reference cell.
 updateSRef :: SRef a -> (a -> a) -> RPW ()
