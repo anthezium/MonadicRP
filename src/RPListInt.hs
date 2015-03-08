@@ -1,9 +1,10 @@
-{-# LANGUAGE Safe #-}
+--{-# LANGUAGE NamedFieldPuns, Safe #-}
+{-# LANGUAGE NamedFieldPuns #-}
 import Control.Concurrent.MVar (takeMVar)
-import Control.Monad (forM_, replicateM)
+import Control.Monad (forM, forM_, replicateM)
 import Data.List (group, intercalate)
 
-import RP ( RP, RPE, RPR, RPW, runRP, forkRP, threadDelayRP, readRP, writeRP
+import RP ( RP, RPE, RPR, RPW, ThreadState(..), tid, runRP, forkRP, joinRP, threadDelayRP, readRP, writeRP
           , SRef, readSRef, writeSRef, newSRef )
 
 data RPList a = Nil
@@ -28,23 +29,26 @@ deleteMiddle rl = do
 testList :: RP (SRef (RPList Int))
 testList = do
   tail <- newSRef Nil
-  c1   <- newSRef $ Cons 1     tail
-  c2   <- newSRef $ Cons (- 1) c1
-  newSRef $ Cons 0 c2
+  c1   <- newSRef $ Cons (- 1) tail
+  c2   <- newSRef $ Cons 1     c1
+  newSRef $ Cons 1 c2
 
 main :: IO ()
 main = do 
-  (rvtids, wv) <- runRP $ do
-    head    <- testList
+  outs <- runRP $ do
+    -- initialize list
+    head <- testList
     -- spawn 8 readers, each records 100000 snapshots of the list
-    rvtids  <- replicateM 8 $ forkRP $ readRP $ reader 100000 0 head
+    rts <- replicateM 8 $ forkRP $ readRP $ reader 1000000 0 head
     -- spawn a writer to delete the middle node
-    --(wv, _) <- forkRP $ writeRP $ deleteMiddle head
-    (wv, _) <- forkRP $ writeRP $ return ()
-    return (rvtids, wv)
-  -- wait for the readers to finish and print snapshots
-  forM_ rvtids $ \(rv, tid) -> do 
-    v <- takeMVar rv
-    putStrLn $ show tid ++ ": " ++ show v
-  -- wait for the writer to finish
-  takeMVar wv
+    wt  <- forkRP $ writeRP $ deleteMiddle head
+    --wt <- forkRP $ writeRP $ return ()
+    
+    -- wait for the readers to finish and print snapshots
+    outs <- forM rts $ \rt@(ThreadState {tid}) -> do 
+      v <- joinRP rt
+      return $ show tid ++ ": " ++ show v
+    -- wait for the writer to finish
+    joinRP wt
+    return outs
+  forM_ outs putStrLn

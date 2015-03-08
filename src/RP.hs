@@ -1,36 +1,75 @@
-{-# LANGUAGE NamedFieldPuns, Safe, TupleSections #-}
+--{-# LANGUAGE DisambiguateRecordFields, NamedFieldPuns, Safe, TupleSections #-}
+-- TODO: figure out how to trust atomic-primops.  Do I need to build a version of it marked as Trustworthy?
+{-# LANGUAGE DisambiguateRecordFields, FlexibleInstances, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
 module RP 
-  ( SRef(), RP(), RPE(), RPR(), RPW(),
-    newSRef, readSRef, writeSRef,
-    runRP, runRPE, runRPR, runRPW,
-    forkRP, threadDelayRP, readRP, writeRP
+  ( SRef(), RP(), RPE(), RPR(), RPW()
+  , ThreadState(..) 
+  , newSRef, readSRef, writeSRef
+  , runRP, forkRP, joinRP, synchronizeRP, threadDelayRP, readRP, writeRP
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, threadDelay)
-import Control.Concurrent.MVar (MVar(..), newEmptyMVar, putMVar)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Control.Concurrent.MVar (MVar(..), modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Monad (forM_, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Reader (ReaderT(..), ask, runReaderT)
+import Data.Atomics (loadLoadBarrier, storeLoadBarrier, writeBarrier)
+import Data.Int (Int64)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (delete)
+
+type Counter = IORef Int64
+
+offline    = 0
+online     = 1
+counterInc = 2
+
+newCounter :: IO Counter
+newCounter  = newIORef online
+
+newGCounter :: IO Counter
+newGCounter = newIORef online
+
+-- right now really just "values that must be protected with mutual exclusion"
+data RPState  = RPState  { countersVRP :: MVar [Counter]  -- this field is mutated
+                         , gCounterRP  :: Counter }       -- this field is a reference, so it will never change
+
+data RPEState = RPEState { countersV :: MVar [Counter]
+                         , gCounter  :: Counter
+                         , counter   :: Counter }
+
+data ThreadState a = ThreadState { ctr :: Counter
+                                 , rv  :: MVar a
+                                 , tid :: ThreadId }
 
 -- Relativistic programming monads
-newtype RP  a = UnsafeRP  { runRP  :: IO a } 
-newtype RPE a = UnsafeRPE { runRPE :: IO a }
-newtype RPR a = UnsafeRPR { runRPR :: IO a }
-newtype RPW a = UnsafeRPW { runRPW :: IO a }
+newtype RPIO  a = UnsafeRPIO  { runRPIO   :: IO a } 
+newtype RPEIO a = UnsafeRPEIO { runRPEIO  :: IO a }
+newtype RPRIO a = UnsafeRPRIO { runRPRIO  :: IO a }
+newtype RPWIO a = UnsafeRPWIO { runRPWIO  :: IO a }
 
-instance Monad RP where
-  return = UnsafeRP . return
-  (UnsafeRP  m) >>= k = UnsafeRP  $ runRP  . k =<< m
+instance Monad RPIO where
+  return = UnsafeRPIO  . return
+  (UnsafeRPIO  m) >>= k = UnsafeRPIO  $ m >>= runRPIO  . k
 
-instance Monad RPE where
-  return = UnsafeRPE . return
-  (UnsafeRPE m) >>= k = UnsafeRPE $ runRPE . k =<< m
+instance Monad RPEIO where
+  return = UnsafeRPEIO . return
+  (UnsafeRPEIO m) >>= k = UnsafeRPEIO $ m >>= runRPEIO . k
 
-instance Monad RPR where
-  return = UnsafeRPR . return
-  (UnsafeRPR m) >>= k = UnsafeRPR $ runRPR . k =<< m
+instance Monad RPRIO where
+  return = UnsafeRPRIO . return
+  (UnsafeRPRIO m) >>= k = UnsafeRPRIO $ m >>= runRPRIO . k
 
-instance Monad RPW where
-  return = UnsafeRPW . return
-  (UnsafeRPW m) >>= k = UnsafeRPW $ runRPW . k =<< m
+instance Monad RPWIO where
+  return = UnsafeRPWIO . return
+  (UnsafeRPWIO m) >>= k = UnsafeRPWIO $ m >>= runRPWIO . k
+
+type RP  a = ReaderT RPState  RPIO  a
+type RPE a = ReaderT RPEState RPEIO a
+type RPR a = RPRIO a
+type RPW a = ReaderT RPEState RPWIO a
+
+-- Shared references
 
 newtype SRef a = SRef (IORef a)
 
@@ -38,43 +77,138 @@ class RPRead m where
   -- | Dereference a cell.
   readSRef :: SRef a -> m a
 
-instance RPRead RPR where
-  readSRef (SRef r) = UnsafeRPR $ readIORef r
+instance RPRead RPRIO where
+  readSRef (SRef r) = UnsafeRPRIO $ readIORef r
 
-instance RPRead RPW where
-  readSRef (SRef r) = UnsafeRPW $ readIORef r 
+instance RPRead (ReaderT RPEState RPWIO) where
+  readSRef (SRef r) = lift $ UnsafeRPWIO $ readIORef r 
 
 -- | Allocate a new shared reference cell.
 newSRef :: a -> RP (SRef a)
-newSRef x = do
-  r <- UnsafeRP $ newIORef x
+newSRef x = lift $ UnsafeRPIO $ do
+  r <- newIORef x
   return $ SRef r
-
--- | Spawn a new thread.
-forkRP :: RPE a -> RP (MVar a, ThreadId)
-forkRP m = UnsafeRP $ do 
-  v   <- newEmptyMVar 
-  tid <- forkIO $ putMVar v =<< runRPE m
-  return (v, tid)
-
--- | Read-side critical section.
-readRP :: RPR a -> RPE a
-readRP = UnsafeRPE . runRPR
-
--- | Write-side critical section.
-writeRP :: RPW a -> RPE a
-writeRP = UnsafeRPE . runRPW
 
 -- | Swap the new version into the reference cell.
 writeSRef :: SRef a -> a -> RPW ()
---writeSRef r x = updateSRef r $ const x
-writeSRef (SRef r) x = UnsafeRPW $ writeIORef r x
+writeSRef r x = updateSRef r $ const x
+--writeSRef (SRef r) x = UnsafeRPW $ writeIORef r x
+-- atomic-primops-0.7 provides storeLoadBarrier, loadLoadBarrier, and writeBarrier.
+-- these are implemented in the GHC RTS \cite{SMP.h} as assembly.  
+-- on x86_64:
+-- storeLoadBarrier compiles to
+-- __asm__ __volatile__ ("lock; addq $0,0(%%rsp)" : : : "memory");
+-- This adds 0 to a quad-word at the bottom of the stack, a no-op whose destination is a memory location that is cached on the core
+-- where the instruction executes.  Prefixing this with \texttt{lock} does two things:
+--   * It guarantees that no memory access on this core are reordered before or after the lock-prefixed instruction \cite{IntelMemOrder}.
+--   * It guarantees that the operation on the destination memory location (the no-op on the bottom of the stack)
+--     is atomic from the perspective of all cores.  However, because this location is already cached here, this core doesn't need to
+--     lock the bus to ensure atomicity: it can rely on the cache coherency mechanism for that.  And no other core is likely to load the
+--     value at the bottom of this thread's stack, so the cache coherency mechanism effectively never generates bus traffic because of this instruction.
+-- So the atomicity guarantee doesn't have an effect on performance, while still providing a memory barrier on this core.
+-- loadLoadBarrier compiles to
+-- __asm__ __volatile__ ("" : : : "memory");
+-- No instruction is needed here since on a given core, loads are not reordered with other loads \cite{IntelMemOrder}.
+-- writeBarrier also compiles to
+-- __asm__ __volatile__ ("" : : : "memory");
+-- No instruction is needed here since on a given core, stores are not reordered with other stores except in limited circumstances \cite{IntelMemOrder}
+-- that (presumably) do not apply in the assembly GHC generates.
 
 -- | Compute an update and swap it into the reference cell.
 updateSRef :: SRef a -> (a -> a) -> RPW ()
-updateSRef (SRef r) f = UnsafeRPW $ do
-  atomicModifyIORef' r ((, ()) . f)
+--updateSRef (SRef r) f = UnsafeRPW $ do
+--  atomicModifyIORef' r ((, ()) . f)
+updateSRef (SRef r) f = lift $ UnsafeRPWIO $ do
+  storeLoadBarrier -- probably just need writeBarrier, or no barrier
+  modifyIORef' r f
+  storeLoadBarrier -- probably just need writeBarrier, or no barrier
+
+-- Relativistic computations.
+
+-- | Relativistic computation.
+runRP :: RP a -> IO a
+runRP m = do
+  gc <- newGCounter
+  cv <- newMVar []
+  let s = RPState { gCounterRP = gc, countersVRP = cv }
+  runRPIO $ runReaderT m s
+
+-- | Initialize and run a new relativistic program thread.
+--   * Create an MVar for the return value.
+--   * Create a counter for grace period tracking.
+--   * Spawn the thread.
+--   * Return the counter, return MVar, and thread ID.
+forkRP :: RPE a -> RP (ThreadState a)
+forkRP m = do 
+  c    <- lift $ UnsafeRPIO $ newCounter
+  RPState {countersVRP, gCounterRP} <- ask
+  -- add this thread's grace period counter to the global list
+  lift $ UnsafeRPIO $ modifyMVar_ countersVRP $ \cs -> do
+    return $ c : cs
+  v    <- lift $ UnsafeRPIO $ newEmptyMVar -- no return value yet
+  let s = RPEState { counter = c, gCounter = gCounterRP, countersV = countersVRP }
+  tid  <- lift $ UnsafeRPIO $ forkIO $ putMVar v =<< (runRPEIO $ runReaderT m s)
+  return $ ThreadState { rv = v, tid = tid, ctr = c }
+
+joinRP :: ThreadState a -> RP a
+joinRP (ThreadState {rv, ctr}) = do
+  v <- lift $ UnsafeRPIO $ takeMVar rv
+  RPState {countersVRP} <- ask
+  lift $ UnsafeRPIO $ modifyMVar_ countersVRP $ \cs -> do
+    return $ delete ctr cs 
+  return v
+
+-- | Read-side critical section.
+readRP :: RPR a -> RPE a
+readRP m = do
+  RPEState {counter, gCounter} <- ask
+  x <- lift $ UnsafeRPEIO $ runRPRIO m
+  -- for now, just announce a quiescent state at the end of every read-side critical section
+  lift $ UnsafeRPEIO $ do 
+    storeLoadBarrier
+    writeIORef counter =<< readIORef gCounter
+    storeLoadBarrier
+  return x
+
+-- | Write-side critical section.
+writeRP :: RPW a -> RPE a
+writeRP m = do 
+  s <- ask
+  -- run write-side critical section
+  -- TODO: add a lock (separate from counter lock) to serialize writers
+  x <- lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ do
+    x <- m
+    -- TODO: what if the RPW critical section already ends with a call to synchronizeRP?
+    synchronizeRP
+    return x
+  return x
+
+synchronizeRP :: RPW ()
+synchronizeRP = do
+  -- wait for readers
+  RPEState {counter, gCounter, countersV} <- ask
+  c <- lift $ UnsafeRPWIO $ readIORef counter
+  lift $ UnsafeRPWIO $ do
+    storeLoadBarrier
+    when (c /= offline) $ writeIORef counter offline
+    -- make sure this counter store isn't reordered inside or after the scan below
+    writeBarrier
+  lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
+    modifyIORef' gCounter (+ counterInc)
+    writeBarrier
+    forM_ counters $ waitForCatchUp gCounter
+  lift $ UnsafeRPWIO $ do
+    when (c /= offline) $ writeIORef counter =<< readIORef gCounter
+    storeLoadBarrier
+  where waitForCatchUp gCounter counter = do
+          c  <- readIORef counter
+          gc <- readIORef gCounter
+          loadLoadBarrier -- to prevent caching of reads.  will this work for that?
+          if c /= offline && c /= gc
+             then do threadDelay 10
+                     waitForCatchUp gCounter counter
+             else return ()
 
 -- | Delay an RP thread.
 threadDelayRP :: Int -> RP ()
-threadDelayRP = UnsafeRP . threadDelay
+threadDelayRP = lift . UnsafeRPIO . threadDelay
