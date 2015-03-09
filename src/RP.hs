@@ -17,6 +17,7 @@ import Data.Atomics (loadLoadBarrier, storeLoadBarrier, writeBarrier)
 import Data.Int (Int64)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (delete)
+import Debug.Trace (trace)
 
 type Counter = IORef Int64
 
@@ -83,11 +84,19 @@ instance RPRead RPRIO where
 instance RPRead (ReaderT RPEState RPWIO) where
   readSRef (SRef r) = lift $ UnsafeRPWIO $ readIORef r 
 
--- | Allocate a new shared reference cell.
-newSRef :: a -> RP (SRef a)
-newSRef x = lift $ UnsafeRPIO $ do
+class RPNew m where
+  -- | Allocate a new shared reference cell.
+  newSRef :: a -> m (SRef a)
+
+newSRefIO :: a -> IO (SRef a)
+newSRefIO x = do
   r <- newIORef x
   return $ SRef r
+
+instance RPNew (ReaderT RPState RPIO) where
+  newSRef = lift . UnsafeRPIO . newSRefIO
+instance RPNew (ReaderT RPEState RPWIO) where
+  newSRef = lift . UnsafeRPWIO . newSRefIO
 
 -- | Swap the new version into the reference cell.
 writeSRef :: SRef a -> a -> RPW ()
@@ -165,8 +174,27 @@ readRP m = do
   x <- lift $ UnsafeRPEIO $ runRPRIO m
   -- for now, just announce a quiescent state at the end of every read-side critical section
   lift $ UnsafeRPEIO $ do 
+    -- temporary to make debugging easier
+    --threadDelay 1000000
     storeLoadBarrier
+    -- these atomicModifyIORef' calls (or those below the copy), seem to have fixed the race
+    -- condition.  how to get rid of them?
+    -- this one too?  what a hell
+    --atomicModifyIORef' gCounter (, ()) 
+    -- at least this one matters
+    --atomicModifyIORef' counter (, ()) 
+    --gc <- readIORef gCounter
+    --c  <- readIORef counter
+    --(if gc /= c then trace ("reader updating c from " ++ show c ++ " to " ++ show gc) else id) writeIORef counter gc
     writeIORef counter =<< readIORef gCounter
+    -- so does this one (below)
+    atomicModifyIORef' gCounter (, ()) 
+    -- this one (below) seems to matter
+    atomicModifyIORef' counter (, ()) 
+    --writeIORef counter =<< readIORef gCounter
+    --gc <- readIORef gCounter
+    --storeLoadBarrier
+    --writeIORef counter gc
     storeLoadBarrier
   return x
 
@@ -176,12 +204,11 @@ writeRP m = do
   s <- ask
   -- run write-side critical section
   -- TODO: add a lock (separate from counter lock) to serialize writers
-  x <- lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ do
+  lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ do
     x <- m
     -- TODO: what if the RPW critical section already ends with a call to synchronizeRP?
     synchronizeRP
     return x
-  return x
 
 synchronizeRP :: RPW ()
 synchronizeRP = do
@@ -190,24 +217,29 @@ synchronizeRP = do
   c <- lift $ UnsafeRPWIO $ readIORef counter
   lift $ UnsafeRPWIO $ do
     storeLoadBarrier
-    when (c /= offline) $ writeIORef counter offline
+    when (c /= offline) $ trace ("top setting writer counter offline") $ writeIORef counter offline
     -- make sure this counter store isn't reordered inside or after the scan below
     writeBarrier
   lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
     modifyIORef' gCounter (+ counterInc)
     writeBarrier
+    trace ("waiting for " ++ show (length counters) ++ " counters") $ return ()
     forM_ counters $ waitForCatchUp gCounter
   lift $ UnsafeRPWIO $ do
-    when (c /= offline) $ writeIORef counter =<< readIORef gCounter
+    when (c /= offline) $ trace ("bottom setting writer counter to gCounter") $ writeIORef counter =<< readIORef gCounter
     storeLoadBarrier
+  trace ("completed synchronizeRP") $ return ()
   where waitForCatchUp gCounter counter = do
+          --atomicModifyIORef' counter (, ())
           c  <- readIORef counter
+          --atomicModifyIORef' gCounter (, ())
           gc <- readIORef gCounter
+          trace ("c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
           loadLoadBarrier -- to prevent caching of reads.  will this work for that?
           if c /= offline && c /= gc
              then do threadDelay 10
                      waitForCatchUp gCounter counter
-             else return ()
+             else trace ("completed wait for reader, c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
 
 -- | Delay an RP thread.
 threadDelayRP :: Int -> RP ()
