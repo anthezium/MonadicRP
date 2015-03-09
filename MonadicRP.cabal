@@ -49,3 +49,17 @@ executable RPListInt
     , containers           >= 0.5.5.1
     , mtl
     , transformers
+
+executable RPListMove 
+  default-language:        Haskell2010
+  main-is:                 RPListMove.hs
+  hs-source-dirs:          src
+  ghc-options:
+    -threaded
+    "-with-rtsopts=-N"
+  build-depends:           
+      atomic-primops
+    , base                 >= 4.6
+    , containers           >= 0.5.5.1
+    , mtl
+    , transformers
