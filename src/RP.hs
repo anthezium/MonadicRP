@@ -1,16 +1,17 @@
 --{-# LANGUAGE DisambiguateRecordFields, NamedFieldPuns, Safe, TupleSections #-}
 -- TODO: figure out how to trust atomic-primops.  Do I need to build a version of it marked as Trustworthy?
-{-# LANGUAGE DisambiguateRecordFields, FlexibleInstances, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
+{-# LANGUAGE DisambiguateRecordFields, FlexibleInstances, MagicHash, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
 module RP 
   ( SRef(), RP(), RPE(), RPR(), RPW()
   , ThreadState(..) 
-  , newSRef, readSRef, writeSRef
+  , newSRef, readSRef, writeSRef, copySRef
   , runRP, forkRP, joinRP, synchronizeRP, threadDelayRP, readRP, writeRP
   ) where
 
+import Control.Applicative ((<*>))
 import Control.Concurrent (ThreadId, forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar(..), modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import Control.Monad (forM_, when)
+import Control.Monad (ap, forM_, liftM, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (ReaderT(..), ask, runReaderT)
 import Data.Atomics (loadLoadBarrier, storeLoadBarrier, writeBarrier)
@@ -18,12 +19,27 @@ import Data.Int (Int64)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (delete)
 import Debug.Trace (trace)
+import GHC.Exts (MutVar#(..), Word64#(..), newMutVar#, readMutVar#, writeMutVar#, atomicModifyMutVar#) 
+import GHC.Prim (RealWorld(..), State#(..))
+
+-- TODO: unboxed counter (single-element array of Word64) in the style of Data.Atomics.Counter.AtomicCounter (but not with Int)
+--type MCounter = MutableByteArray# RealWorld Word64#
+
+--newMCounter :: State# RealWorld -> IO (MCounter)
+--newMCounter s# = return $ snd $ newMutVar# 1 s#
 
 type Counter = IORef Int64
 
 offline    = 0
 online     = 1
 counterInc = 2
+
+writeCounter :: Counter -> Int64 -> IO ()
+writeCounter c x = x `seq` writeIORef c x
+
+readCounter :: Counter -> IO Int64
+readCounter c = do x <- readIORef c
+                   x `seq` return x
 
 newCounter :: IO Counter
 newCounter  = newIORef online
@@ -52,18 +68,38 @@ newtype RPWIO a = UnsafeRPWIO { runRPWIO  :: IO a }
 instance Monad RPIO where
   return = UnsafeRPIO  . return
   (UnsafeRPIO  m) >>= k = UnsafeRPIO  $ m >>= runRPIO  . k
+instance Applicative RPIO where
+  pure  = return
+  (<*>) = ap
+instance Functor RPIO where
+  fmap  = liftM
 
 instance Monad RPEIO where
   return = UnsafeRPEIO . return
   (UnsafeRPEIO m) >>= k = UnsafeRPEIO $ m >>= runRPEIO . k
+instance Applicative RPEIO where
+  pure  = return
+  (<*>) = ap
+instance Functor RPEIO where
+  fmap  = liftM
 
 instance Monad RPRIO where
   return = UnsafeRPRIO . return
   (UnsafeRPRIO m) >>= k = UnsafeRPRIO $ m >>= runRPRIO . k
+instance Applicative RPRIO where
+  pure  = return
+  (<*>) = ap
+instance Functor RPRIO where
+  fmap  = liftM
 
 instance Monad RPWIO where
   return = UnsafeRPWIO . return
   (UnsafeRPWIO m) >>= k = UnsafeRPWIO $ m >>= runRPWIO . k
+instance Applicative RPWIO where
+  pure  = return
+  (<*>) = ap
+instance Functor RPWIO where
+  fmap  = liftM
 
 type RP  a = ReaderT RPState  RPIO  a
 type RPE a = ReaderT RPEState RPEIO a
@@ -79,10 +115,14 @@ class RPRead m where
   readSRef :: SRef a -> m a
 
 instance RPRead RPRIO where
-  readSRef (SRef r) = UnsafeRPRIO $ readIORef r
+  readSRef = UnsafeRPRIO . readSRefIO 
 
 instance RPRead (ReaderT RPEState RPWIO) where
-  readSRef (SRef r) = lift $ UnsafeRPWIO $ readIORef r 
+  readSRef = lift . UnsafeRPWIO . readSRefIO 
+
+readSRefIO :: SRef a -> IO a
+readSRefIO (SRef r) = do x <- readIORef r
+                         x `seq` return x
 
 class RPNew m where
   -- | Allocate a new shared reference cell.
@@ -97,6 +137,15 @@ instance RPNew (ReaderT RPState RPIO) where
   newSRef = lift . UnsafeRPIO . newSRefIO
 instance RPNew (ReaderT RPEState RPWIO) where
   newSRef = lift . UnsafeRPWIO . newSRefIO
+
+copySRefIO :: SRef a -> IO (SRef a)
+copySRefIO (SRef r) = do
+  x  <- readIORef r
+  r' <- x `seq` newIORef x -- does this duplicate x?
+  return $ SRef r'
+
+copySRef :: SRef a -> RPW (SRef a)
+copySRef = lift . UnsafeRPWIO . copySRefIO
 
 -- | Swap the new version into the reference cell.
 writeSRef :: SRef a -> a -> RPW ()
@@ -183,18 +232,10 @@ readRP m = do
     --atomicModifyIORef' gCounter (, ()) 
     -- at least this one matters
     --atomicModifyIORef' counter (, ()) 
-    --gc <- readIORef gCounter
-    --c  <- readIORef counter
-    --(if gc /= c then trace ("reader updating c from " ++ show c ++ " to " ++ show gc) else id) writeIORef counter gc
-    writeIORef counter =<< readIORef gCounter
+    writeCounter counter =<< readCounter gCounter
     -- so does this one (below)
     atomicModifyIORef' gCounter (, ()) 
     -- this one (below) seems to matter
-    atomicModifyIORef' counter (, ()) 
-    --writeIORef counter =<< readIORef gCounter
-    --gc <- readIORef gCounter
-    --storeLoadBarrier
-    --writeIORef counter gc
     storeLoadBarrier
   return x
 
@@ -214,31 +255,31 @@ synchronizeRP :: RPW ()
 synchronizeRP = do
   -- wait for readers
   RPEState {counter, gCounter, countersV} <- ask
-  c <- lift $ UnsafeRPWIO $ readIORef counter
+  c <- lift $ UnsafeRPWIO $ readCounter counter
   lift $ UnsafeRPWIO $ do
     storeLoadBarrier
-    when (c /= offline) $ trace ("top setting writer counter offline") $ writeIORef counter offline
+    when (c /= offline) $ trace ("top setting writer counter offline") $ writeCounter counter offline
     -- make sure this counter store isn't reordered inside or after the scan below
     writeBarrier
   lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
     modifyIORef' gCounter (+ counterInc)
     writeBarrier
     trace ("waiting for " ++ show (length counters) ++ " counters") $ return ()
-    forM_ counters $ waitForCatchUp gCounter
+    forM_ counters $ waitForReader gCounter
   lift $ UnsafeRPWIO $ do
-    when (c /= offline) $ trace ("bottom setting writer counter to gCounter") $ writeIORef counter =<< readIORef gCounter
+    when (c /= offline) $ trace ("bottom setting writer counter to gCounter") $ writeCounter counter =<< readCounter gCounter
     storeLoadBarrier
   trace ("completed synchronizeRP") $ return ()
-  where waitForCatchUp gCounter counter = do
+  where waitForReader gCounter counter = do
           --atomicModifyIORef' counter (, ())
-          c  <- readIORef counter
+          c  <- readCounter counter
           --atomicModifyIORef' gCounter (, ())
-          gc <- readIORef gCounter
+          gc <- readCounter gCounter
           trace ("c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
           loadLoadBarrier -- to prevent caching of reads.  will this work for that?
           if c /= offline && c /= gc
              then do threadDelay 10
-                     waitForCatchUp gCounter counter
+                     waitForReader gCounter counter
              else trace ("completed wait for reader, c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
 
 -- | Delay an RP thread.
