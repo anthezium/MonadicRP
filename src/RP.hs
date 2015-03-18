@@ -1,6 +1,6 @@
 --{-# LANGUAGE DisambiguateRecordFields, NamedFieldPuns, Safe, TupleSections #-}
 -- TODO: figure out how to trust atomic-primops.  Do I need to build a version of it marked as Trustworthy?
-{-# LANGUAGE DisambiguateRecordFields, FlexibleInstances, MagicHash, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
+{-# LANGUAGE BangPatterns, DisambiguateRecordFields, FlexibleInstances, MagicHash, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
 module RP 
   ( SRef(), RP(), RPE(), RPR(), RPW()
   , ThreadState(..) 
@@ -229,7 +229,7 @@ readRP m = do
     -- these atomicModifyIORef' calls (or those below the copy), seem to have fixed the race
     -- condition.  how to get rid of them?
     -- this one too?  what a hell
-    --atomicModifyIORef' gCounter (, ()) 
+    atomicModifyIORef' gCounter (, ()) 
     -- at least this one matters
     --atomicModifyIORef' counter (, ()) 
     writeCounter counter =<< readCounter gCounter
