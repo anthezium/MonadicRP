@@ -1,9 +1,8 @@
-{-# LANGUAGE Safe #-}
-import Control.Concurrent.MVar (takeMVar)
-import Control.Monad (forM_, replicateM)
+--{-# LANGUAGE Safe #-}
+import Control.Monad (forM, forM_, replicateM)
 import Data.List (group, intercalate)
 
-import RP ( RP, RPE, RPR, RPW, runRP, forkRP, threadDelayRP, readRP, writeRP
+import RP ( RP, RPE, RPR, RPW, runRP, forkRP, threadDelayRP, readRP, writeRP, joinRP
           , SRef, readSRef, writeSRef, newSRef )
 
 data RPList a = Nil
@@ -17,14 +16,14 @@ snapshot (Cons x rn) = do
   return $ x : rest
 
 reader :: Show a => SRef (RPList a) -> RPR [a]
-reader rl = do
-  snapshot =<< readSRef rl
+reader head = do
+  snapshot =<< readSRef head
 
 deleteMiddle :: SRef (RPList a) -> RPW ()
-deleteMiddle rl = do
-  (Cons a rn) <- readSRef rl
+deleteMiddle head = do
+  (Cons a rn) <- readSRef head
   (Cons _ rm) <- readSRef rn
-  writeSRef rl $ Cons a rm 
+  writeSRef head $ Cons a rm 
 
 testList :: RP (SRef (RPList Char))
 testList = do
@@ -38,16 +37,16 @@ compactShow xs = intercalate ", " $ map (\xs -> show (length xs) ++ " x " ++ sho
 
 main :: IO ()
 main = do 
-  (rvtids, wv) <- runRP $ do
-    rl      <- testList
+  outs <- runRP $ do
+    head  <- testList
     -- spawn 8 readers, each records 100000 snapshots of the list
-    rvtids  <- replicateM 8 $ forkRP $ readRP $ replicateM 100000 $ reader rl
+    rts <- replicateM 8 $ forkRP $ readRP $ replicateM 100000 $ reader head
     -- spawn a writer to delete the middle node
-    (wv, _) <- forkRP $ writeRP $ deleteMiddle rl
-    return (rvtids, wv)
-  -- wait for the readers to finish and print snapshots
-  forM_ rvtids $ \(rv, tid) -> do 
-    v <- takeMVar rv
-    putStrLn $ show tid ++ ": " ++ compactShow v
-  -- wait for the writer to finish
-  takeMVar wv
+    wt  <- forkRP $ writeRP $ deleteMiddle head
+    -- wait for the readers to finish and return snapshots
+    rvs <- forM rts joinRP
+    -- wait for the writer to finish
+    joinRP wt
+    return rvs
+  forM_ (zip [1..] outs) $ \(i, v) -> do 
+    putStrLn $ "Thread " ++ show i ++ ": " ++ compactShow v
