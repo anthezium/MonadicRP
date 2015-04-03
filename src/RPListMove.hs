@@ -78,7 +78,7 @@ main = do
     -- initialize list
     head <- testList
     -- spawn 8 readers, each records 10000 snapshots of the list
-    rts  <- replicateM 8 $ forkRP $ replicateM 100000 $ readRP $ reader head
+    rts  <- replicateM 8 $ forkRP $ replicateM 10000 $ readRP $ reader head
     -- spawn a writer to delete the middle node
     wt   <- forkRP $ writeRP $ moveDback head
     --wt <- forkRP $ writeRP $ return ()
@@ -88,6 +88,6 @@ main = do
       v <- joinRP rt
       return $ show tid ++ ": " ++ compactShow v
     -- wait for the writer to finish
-    joinRP wt
+    outs `seq` joinRP wt
     return outs
   forM_ outs putStrLn
