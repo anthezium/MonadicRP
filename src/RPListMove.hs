@@ -18,7 +18,7 @@ snapshot (Cons x rn) = do
   rest <- snapshot l
   return $ x : rest
 
-reader :: Show a => SRef (RPList a) -> RPR [a]
+reader :: SRef (RPList a) -> RPR [a]
 reader head = do
   snapshot =<< readSRef head
   --h <- readSRef head
@@ -78,7 +78,7 @@ main = do
     -- initialize list
     head <- testList
     -- spawn 8 readers, each records 10000 snapshots of the list
-    rts  <- replicateM 8 $ forkRP $ replicateM 10000 $ readRP $ reader head
+    rts  <- replicateM 8 $ forkRP $ replicateM 200000 $ readRP $ reader head
     -- spawn a writer to delete the middle node
     wt   <- forkRP $ writeRP $ moveDback head
     --wt <- forkRP $ writeRP $ return ()

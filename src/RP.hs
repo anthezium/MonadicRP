@@ -41,6 +41,10 @@ newCounter  = newIORef online
 newGCounter :: IO Counter
 newGCounter = newIORef online
 
+-- TODO: add a private online/offline flag that threads update when they go
+-- online/offline and no other thread touches, maybe this will improve cache
+-- behavior?
+
 data RPState  = RPState  { countersVRP :: MVar [Counter]  
                          , gCounterRP  :: Counter }       
 
@@ -191,7 +195,7 @@ forkRP m = do
        writeBarrier
        trace ("thread going offline") $ 
          writeCounter c offline
-
+       -- lock on MVar should act as a barrier
        modifyMVar_ countersVRP $ \cs -> do
          return $ delete c cs 
        return ()
@@ -207,19 +211,23 @@ joinRP (ThreadState {tid, rv, ctr}) = do
 readRP :: RPR a -> RPE a
 readRP m = do
   RPEState {counter, gCounter} <- ask
+  -- need to deal with the possibility that this thread was offline; if so, take a snapshot of gCounter.
+  lift $ UnsafeRPEIO $ do
+    -- do I need this to prevent earlier writes to counter from being reordered below this read?
+    -- seems like I should not, since there is a data dependency, and nobody but this thread will
+    -- ever write to this counter.
+    --writeBarrier     
+    c <- readCounter counter
+    when (c == offline) $ trace ("reader going online") $ do
+      writeCounter counter =<< readCounter gCounter
+      storeLoadBarrier -- need a guarantee that this thread will be seen as online before any of
+                       -- the reads in the read-side critical section below, right?
   -- run read-side critical section
   x <- lift $ UnsafeRPEIO $ runRPRIO m
   -- for now, just announce a quiescent state at the end of every read-side critical section
   lift $ UnsafeRPEIO $ do 
     storeLoadBarrier
-    -- these atomicModifyIORef' calls seem to have fixed the race
-    -- condition.  how to get rid of them?
-    --atomicModifyIORef' gCounter (, ()) 
-
     writeCounter counter =<< readCounter gCounter
-
-    -- so does this one
-    --atomicModifyIORef' gCounter (, ()) 
     storeLoadBarrier
   return x
 
@@ -231,7 +239,10 @@ writeRP m = do
   -- TODO: add a lock (separate from counter lock) to serialize writers
   lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ do
     x <- m
-    -- TODO: what if the RPW critical section already ends with a call to synchronizeRP?
+    -- TODO: what if the RPW critical section already ends with a call to
+    -- synchronizeRP?  
+    -- wait at the end so to guarantee that this critical section
+    -- happens before the next critical section.
     synchronizeRP
     return x
 
@@ -243,12 +254,10 @@ synchronizeRP = do
   lift $ UnsafeRPWIO $ do
     storeLoadBarrier
     when (c /= offline) $ trace ("top setting writer counter offline") $ writeCounter counter offline
-    -- make sure this counter store isn't reordered inside or after the scan below
-    --storeLoadBarrier
   lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
     modifyIORef' gCounter (+ counterInc)
-    storeLoadBarrier
-    --writeBarrier
+    --storeLoadBarrier
+    writeBarrier
     trace ("waiting for " ++ show (length counters) ++ " counters") $ return ()
     forM_ counters $ waitForReader gCounter
   lift $ UnsafeRPWIO $ do
