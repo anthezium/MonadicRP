@@ -151,12 +151,10 @@ writeSRef r x = updateSRef r $ const x
 
 -- | Compute an update and swap it into the reference cell.
 updateSRef :: SRef a -> (a -> a) -> RPW ()
---updateSRef (SRef r) f = UnsafeRPW $ do
---  atomicModifyIORef' r ((, ()) . f)
 updateSRef (SRef r) f = lift $ UnsafeRPWIO $ do
-  --storeLoadBarrier -- probably just need writeBarrier, or no barrier
+  writeBarrier -- this is where urcu-pointer.c puts it
   modifyIORef' r f
-  --storeLoadBarrier -- probably just need writeBarrier, or no barrier
+  
 
 -- Relativistic computations.
 

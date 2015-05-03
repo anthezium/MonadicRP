@@ -11,12 +11,6 @@ import RP ( RP, RPE, RPR, RPW, ThreadState(..), tid, runRP, forkRP, joinRP, sync
 data RPList a = Nil
               | Cons a (SRef (RPList a))
 
-
-prependA :: SRef (RPList Char) -> RPR ()
-prependA head = do head' <- copySRef head
-                   writeSRef head (Cons 'A' head')
-
-
 snapshot :: RPList a -> RPR [a]
 snapshot Nil         = return []
 snapshot (Cons x rn) = do 
@@ -51,12 +45,12 @@ moveBforward head = do
   rd'            <- copySRef rd
   -- link in a new B after C
   writeSRef rd $ Cons b rd'
-  -- any reader who starts after this write is issued
+  -- any reader who starts during this grace period 
   -- sees either "ABCD" or "ABCBD" 
   --synchronizeRP -- interaction of write order and traversal order means you don't need this
-  -- unlink the old B
-  writeSRef rb cc
-  -- any reader who starts after this write is issued
+  -- remove the old 'B'
+  writeSRef rb $ cc
+  -- any reader who starts during this grace period 
   -- sees either "ABCBD" or "ACBD" 
 
 moveCback :: SRef (RPList a) -> RPW ()
@@ -73,7 +67,7 @@ moveCback head = do
   -- sees either "ABCD" or "ACBCD"
   synchronizeRP
   -- unlink the old C
-  writeSRef rc de
+  writeSRef rc $ de
   -- any reader who starts during this grace period 
   -- sees either "ACBCD" or "ACBD" 
 
@@ -87,13 +81,13 @@ moveCbackNoSync head = do
   de             <- readSRef rd
   -- link in a new C after A
   writeSRef rb $ Cons c rb'
-  -- any reader who starts after this write is issued
+  -- any reader who starts during this grace period 
   -- sees either "ABCD" or "ACBCD"
   --synchronizeRP -- this operation is NOT safe to omit, 
                   -- because write order and traversal order are the same
   -- unlink the old C
-  writeSRef rc de
-  -- any reader who starts after this write is issued
+  writeSRef rc $ de
+  -- any reader who starts during this grace period 
   -- sees "ABD", "ACBCD", or "ACBD" 
 
 main :: IO ()
@@ -105,8 +99,8 @@ main = do
     rts  <- replicateM 8 $ forkRP $ replicateM 400000 $ readRP $ reader head
     -- spawn a writer to delete the middle node
     --wt   <- forkRP $ writeRP $ moveCback head
-    --wt   <- forkRP $ writeRP $ moveCbackNoSync head
-    wt   <- forkRP $ writeRP $ moveBforward head
+    wt   <- forkRP $ writeRP $ moveCbackNoSync head
+    --wt   <- forkRP $ writeRP $ moveBforward head
     --wt <- forkRP $ writeRP $ return ()
     
     -- wait for the readers to finish and print snapshots
