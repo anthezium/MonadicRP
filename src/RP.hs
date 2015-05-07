@@ -1,6 +1,8 @@
 --{-# LANGUAGE DisambiguateRecordFields, NamedFieldPuns, Safe, TupleSections #-}
 -- TODO: figure out how to trust atomic-primops.  Do I need to build a version of it marked as Trustworthy?
-{-# LANGUAGE BangPatterns, DisambiguateRecordFields, FlexibleInstances, MagicHash, NamedFieldPuns, TupleSections, TypeSynonymInstances #-}
+{-# LANGUAGE BangPatterns, DisambiguateRecordFields, FlexibleInstances
+           , MagicHash, NamedFieldPuns, RankNTypes 
+           , TupleSections, TypeSynonymInstances #-}
 module RP 
   ( SRef(), RP(), RPE(), RPR(), RPW()
   , ThreadState(..) 
@@ -52,106 +54,141 @@ data RPEState = RPEState { countersV :: MVar [Counter]
                          , gCounter  :: Counter
                          , counter   :: Counter }
 
-data ThreadState a = ThreadState { ctr :: Counter
-                                 , rv  :: MVar a
-                                 , tid :: ThreadId }
+data ThreadState s a = ThreadState { ctr :: Counter
+                                   , rv  :: MVar a
+                                   , tid :: ThreadId }
 
 -- Relativistic programming monads
-newtype RPIO  a = UnsafeRPIO  { runRPIO   :: IO a } 
-newtype RPEIO a = UnsafeRPEIO { runRPEIO  :: IO a }
-newtype RPRIO a = UnsafeRPRIO { runRPRIO  :: IO a }
-newtype RPWIO a = UnsafeRPWIO { runRPWIO  :: IO a }
+newtype RPIO  s a = UnsafeRPIO  { runRPIO   :: IO a } 
+newtype RPEIO s a = UnsafeRPEIO { runRPEIO  :: IO a }
+newtype RPRIO s a = UnsafeRPRIO { runRPRIO  :: IO a }
+newtype RPWIO s a = UnsafeRPWIO { runRPWIO  :: IO a }
 
-instance Monad RPIO where
+instance Monad (RPIO s) where
   return = UnsafeRPIO  . return
   (UnsafeRPIO  m) >>= k = UnsafeRPIO  $ m >>= runRPIO  . k
-instance Applicative RPIO where
+instance Applicative (RPIO s) where
   pure  = return
   (<*>) = ap
-instance Functor RPIO where
+instance Functor (RPIO s) where
   fmap  = liftM
 
-instance Monad RPEIO where
+instance Monad (RPEIO s) where
   return = UnsafeRPEIO . return
   (UnsafeRPEIO m) >>= k = UnsafeRPEIO $ m >>= runRPEIO . k
-instance Applicative RPEIO where
+instance Applicative (RPEIO s) where
   pure  = return
   (<*>) = ap
-instance Functor RPEIO where
+instance Functor (RPEIO s) where
   fmap  = liftM
 
-instance Monad RPRIO where
+instance Monad (RPRIO s) where
   return = UnsafeRPRIO . return
   (UnsafeRPRIO m) >>= k = UnsafeRPRIO $ m >>= runRPRIO . k
-instance Applicative RPRIO where
+instance Applicative (RPRIO s) where
   pure  = return
   (<*>) = ap
-instance Functor RPRIO where
+instance Functor (RPRIO s) where
   fmap  = liftM
 
-instance Monad RPWIO where
+instance Monad (RPWIO s) where
   return = UnsafeRPWIO . return
   (UnsafeRPWIO m) >>= k = UnsafeRPWIO $ m >>= runRPWIO . k
-instance Applicative RPWIO where
+instance Applicative (RPWIO s) where
   pure  = return
   (<*>) = ap
-instance Functor RPWIO where
+instance Functor (RPWIO s) where
   fmap  = liftM
 
-type RP  a = ReaderT RPState  RPIO  a
-type RPE a = ReaderT RPEState RPEIO a
-type RPR a = RPRIO a
-type RPW a = ReaderT RPEState RPWIO a
+-- have to use newtypes here since you can't use partially applied
+-- type synonyms in instance declarations.
+newtype RP  s a = RP  { unRP  :: ReaderT RPState  (RPIO  s) a }
+newtype RPE s a = RPE { unRPE :: ReaderT RPEState (RPEIO s) a }
+newtype RPR s a = RPR { unRPR ::                  (RPRIO s) a }
+newtype RPW s a = RPW { unRPW :: ReaderT RPEState (RPWIO s) a }
+
+instance Monad (RP s) where
+  return  = RP  . return
+  m >>= f = RP  $ unRP  m >>= unRP  . f 
+instance Applicative (RP s) where
+  pure    = return
+  (<*>)   = ap
+instance Functor (RP s) where
+  fmap    = liftM
+instance Monad (RPE s) where
+  return  = RPE . return
+  m >>= f = RPE $ unRPE m >>= unRPE . f 
+instance Applicative (RPE s) where
+  pure    = return
+  (<*>)   = ap
+instance Functor (RPE s) where
+  fmap    = liftM
+instance Monad (RPR s) where
+  return  = RPR . return
+  m >>= f = RPR $ unRPR m >>= unRPR . f 
+instance Applicative (RPR s) where
+  pure    = return
+  (<*>)   = ap
+instance Functor (RPR s) where
+  fmap    = liftM
+instance Monad (RPW s) where
+  return  = RPW . return
+  m >>= f = RPW $ unRPW m >>= unRPW . f 
+instance Applicative (RPW s) where
+  pure    = return
+  (<*>)   = ap
+instance Functor (RPW s) where
+  fmap    = liftM
 
 -- Shared references
 
-newtype SRef a = SRef (IORef a)
+newtype SRef s a = SRef (IORef a)
 
 class RPRead m where
   -- | Dereference a cell.
-  readSRef :: SRef a -> m a
+  readSRef :: SRef s a -> m s a
 
-instance RPRead RPRIO where
-  readSRef = UnsafeRPRIO . readSRefIO 
+instance RPRead RPR where
+  readSRef = RPR .        UnsafeRPRIO . readSRefIO 
 
-instance RPRead (ReaderT RPEState RPWIO) where
-  readSRef = lift . UnsafeRPWIO . readSRefIO 
+instance RPRead RPW where
+  readSRef = RPW . lift . UnsafeRPWIO . readSRefIO 
 
-readSRefIO :: SRef a -> IO a
+readSRefIO :: SRef s a -> IO a
 readSRefIO (SRef r) = do x <- readIORef r
                          x `seq` return x
 
 class RPNew m where
   -- | Allocate a new shared reference cell.
-  newSRef :: a -> m (SRef a)
+  newSRef :: a -> m s (SRef s a)
 
-newSRefIO :: a -> IO (SRef a)
+newSRefIO :: a -> IO (SRef s a)
 newSRefIO x = do
   r <- newIORef x
   return $ SRef r
 
-instance RPNew (ReaderT RPState RPIO) where
-  newSRef = lift . UnsafeRPIO . newSRefIO
-instance RPNew (ReaderT RPEState RPWIO) where
-  newSRef = lift . UnsafeRPWIO . newSRefIO
+instance RPNew RP where
+  newSRef = RP  . lift . UnsafeRPIO  . newSRefIO
+instance RPNew RPW where
+  newSRef = RPW . lift . UnsafeRPWIO . newSRefIO
 
-copySRefIO :: SRef a -> IO (SRef a)
+copySRefIO :: SRef s a -> IO (SRef s a)
 copySRefIO (SRef r) = do
   x  <- readIORef r
   r' <- x `seq` newIORef x -- does this duplicate x?
   return $ SRef r'
 
-copySRef :: SRef a -> RPW (SRef a)
-copySRef = lift . UnsafeRPWIO . copySRefIO
+copySRef :: SRef s a -> RPW s (SRef s a)
+copySRef = RPW . lift . UnsafeRPWIO . copySRefIO
 
 -- | Swap the new version into the reference cell.
-writeSRef :: SRef a -> a -> RPW ()
+writeSRef :: SRef s a -> a -> RPW s ()
 writeSRef r x = updateSRef r $ const x
 --writeSRef (SRef r) x = UnsafeRPW $ writeIORef r x
 
 -- | Compute an update and swap it into the reference cell.
-updateSRef :: SRef a -> (a -> a) -> RPW ()
-updateSRef (SRef r) f = lift $ UnsafeRPWIO $ do
+updateSRef :: SRef s a -> (a -> a) -> RPW s ()
+updateSRef (SRef r) f = RPW $ lift $ UnsafeRPWIO $ do
   writeBarrier -- this is where urcu-pointer.c puts it
   modifyIORef' r f
   
@@ -159,20 +196,20 @@ updateSRef (SRef r) f = lift $ UnsafeRPWIO $ do
 -- Relativistic computations.
 
 -- | Relativistic computation.
-runRP :: RP a -> IO a
+runRP :: (forall s. RP s a) -> IO a
 runRP m = do
   gc <- newGCounter
   cv <- newMVar []
   let s = RPState { gCounterRP = gc, countersVRP = cv }
-  runRPIO $ runReaderT m s
+  runRPIO $ flip runReaderT s $ unRP m
 
 -- | Initialize and run a new relativistic program thread.
 --   * Create an MVar for the return value.
 --   * Create a counter for grace period tracking.
 --   * Spawn the thread.
 --   * Return the counter, return MVar, and thread ID.
-forkRP :: RPE a -> RP (ThreadState a)
-forkRP m = do 
+forkRP :: RPE s a -> RP s (ThreadState s a)
+forkRP m = RP $ do 
   c    <- lift $ UnsafeRPIO $ newCounter
   RPState {countersVRP, gCounterRP} <- ask
   -- add this thread's grace period counter to the global list
@@ -181,7 +218,7 @@ forkRP m = do
   v    <- lift $ UnsafeRPIO $ newEmptyMVar -- no return value yet
   let s = RPEState { counter = c, gCounter = gCounterRP, countersV = countersVRP }
   tid  <- lift $ UnsafeRPIO $ forkIO $ 
-    do putMVar v =<< (runRPEIO $ runReaderT m s)
+    do putMVar v =<< (runRPEIO $ flip runReaderT s $ unRPE m)
        -- in case a synchronizeRP caller already holds a reference to ctr 
        -- (and could get stuck waiting for an update to it that will never come).
        -- don't do this inside modifyMVar_ below since that could lead to deadlock
@@ -200,14 +237,14 @@ forkRP m = do
 
   return $ ThreadState { rv = v, tid = tid, ctr = c }
 
-joinRP :: ThreadState a -> RP a
-joinRP (ThreadState {tid, rv, ctr}) = do
+joinRP :: ThreadState s a -> RP s a
+joinRP (ThreadState {tid, rv, ctr}) = RP $ do
   v <- lift $ UnsafeRPIO $ takeMVar rv         -- wait for thread to complete.
   return v
 
 -- | Read-side critical section.
-readRP :: RPR a -> RPE a
-readRP m = do
+readRP :: RPR s a -> RPE s a
+readRP m = RPE $ do
   RPEState {counter, gCounter} <- ask
   -- need to deal with the possibility that this thread was offline; if so, take a snapshot of gCounter.
   lift $ UnsafeRPEIO $ do
@@ -221,7 +258,7 @@ readRP m = do
       storeLoadBarrier -- need a guarantee that this thread will be seen as online before any of
                        -- the reads in the read-side critical section below, right?
   -- run read-side critical section
-  x <- lift $ UnsafeRPEIO $ runRPRIO m
+  x <- lift $ UnsafeRPEIO $ runRPRIO $ unRPR m
   -- for now, just announce a quiescent state at the end of every read-side critical section
   lift $ UnsafeRPEIO $ do 
     storeLoadBarrier
@@ -230,12 +267,12 @@ readRP m = do
   return x
 
 -- | Write-side critical section.
-writeRP :: RPW a -> RPE a
-writeRP m = do 
+writeRP :: RPW s a -> RPE s a
+writeRP m = RPE $ do 
   s <- ask
   -- run write-side critical section
   -- TODO: add a lock (separate from counter lock) to serialize writers
-  lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ do
+  lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ unRPW $ do
     x <- m
     -- TODO: what if the RPW critical section already ends with a call to
     -- synchronizeRP?  
@@ -244,8 +281,8 @@ writeRP m = do
     synchronizeRP
     return x
 
-synchronizeRP :: RPW ()
-synchronizeRP = do
+synchronizeRP :: RPW s ()
+synchronizeRP = RPW $ do
   -- wait for readers
   RPEState {counter, gCounter, countersV} <- ask
   c <- lift $ UnsafeRPWIO $ readCounter counter
@@ -273,5 +310,5 @@ synchronizeRP = do
              else trace ("completed wait for reader, c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
 
 -- | Delay an RP thread.
-threadDelayRP :: Int -> RP ()
-threadDelayRP = lift . UnsafeRPIO . threadDelay
+threadDelayRP :: Int -> RP s ()
+threadDelayRP = RP . lift . UnsafeRPIO . threadDelay

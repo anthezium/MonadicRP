@@ -8,30 +8,30 @@ import Debug.Trace (trace)
 import RP ( RP, RPE, RPR, RPW, ThreadState(..), tid, runRP, forkRP, joinRP, synchronizeRP, threadDelayRP, readRP, writeRP
           , SRef, readSRef, writeSRef, newSRef, copySRef )
 
-data RPList a = Nil
-              | Cons a (SRef (RPList a))
+data RPList s a = Nil
+                | Cons a (SRef s (RPList s a))
 
 
-prependA :: SRef (RPList Char) -> RPR ()
+prependA :: SRef s (RPList s Char) -> RPW s ()
 prependA head = do head' <- copySRef head
                    writeSRef head (Cons 'A' head')
 
 
-snapshot :: RPList a -> RPR [a]
+snapshot :: RPList s a -> RPR s [a]
 snapshot Nil         = return []
 snapshot (Cons x rn) = do 
   l    <- readSRef rn
   rest <- snapshot l
   return $ x : rest
 
-reader :: SRef (RPList a) -> RPR [a]
+reader :: SRef s (RPList s a) -> RPR s [a]
 reader head = do
   snapshot =<< readSRef head
   --h <- readSRef head
   --l <- snapshot h
   --trace ("reader saw " ++ show l) $ return l
 
-testList :: RP (SRef (RPList Char))
+testList :: RP s (SRef s (RPList s Char))
 testList = do
   tail <- newSRef Nil
   c3   <- newSRef $ Cons 'D' tail
@@ -42,7 +42,7 @@ testList = do
 compactShow :: (Show a, Eq a) => [a] -> String
 compactShow xs = intercalate ", " $ map (\xs -> show (length xs) ++ " x " ++ show (head xs)) $ group xs
 
-moveBforward :: SRef (RPList a) -> RPW ()
+moveBforward :: SRef s (RPList s a) -> RPW s ()
 moveBforward head = do
   (Cons a rb)    <- readSRef head
   (Cons b rc)    <- readSRef rb
@@ -59,7 +59,7 @@ moveBforward head = do
   -- any reader who starts after this write is issued
   -- sees either "ABCBD" or "ACBD" 
 
-moveCback :: SRef (RPList a) -> RPW ()
+moveCback :: SRef s (RPList s a) -> RPW s ()
 moveCback head = do
   (Cons a rb)    <- readSRef head
   (Cons b rc)    <- readSRef rb
@@ -77,7 +77,7 @@ moveCback head = do
   -- any reader who starts during this grace period 
   -- sees either "ACBCD" or "ACBD" 
 
-moveCbackNoSync :: SRef (RPList a) -> RPW ()
+moveCbackNoSync :: SRef s (RPList s a) -> RPW s ()
 moveCbackNoSync head = do
   (Cons a rb)    <- readSRef head
   (Cons b rc)    <- readSRef rb
