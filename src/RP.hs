@@ -47,12 +47,14 @@ newGCounter = newIORef online
 -- online/offline and no other thread touches, maybe this will improve cache
 -- behavior?
 
-data RPState  = RPState  { countersVRP :: MVar [Counter]  
-                         , gCounterRP  :: Counter }       
+data RPState  = RPState  { countersVRP   :: MVar [Counter]  
+                         , gCounterRP    :: Counter
+                         , writerLockRP  :: MVar () }       
 
-data RPEState = RPEState { countersV :: MVar [Counter]
-                         , gCounter  :: Counter
-                         , counter   :: Counter }
+data RPEState = RPEState { countersV  :: MVar [Counter]
+                         , gCounter   :: Counter
+                         , counter    :: Counter
+                         , writerLock :: MVar () }
 
 data ThreadState s a = ThreadState { ctr :: Counter
                                    , rv  :: MVar a
@@ -200,7 +202,8 @@ runRP :: (forall s. RP s a) -> IO a
 runRP m = do
   gc <- newGCounter
   cv <- newMVar []
-  let s = RPState { gCounterRP = gc, countersVRP = cv }
+  wl <- newMVar ()
+  let s = RPState { gCounterRP = gc, countersVRP = cv, writerLockRP = wl }
   runRPIO $ flip runReaderT s $ unRP m
 
 -- | Initialize and run a new relativistic program thread.
@@ -211,12 +214,13 @@ runRP m = do
 forkRP :: RPE s a -> RP s (ThreadState s a)
 forkRP m = RP $ do 
   c    <- lift $ UnsafeRPIO $ newCounter
-  RPState {countersVRP, gCounterRP} <- ask
+  RPState {countersVRP, gCounterRP, writerLockRP} <- ask
   -- add this thread's grace period counter to the global list
   lift $ UnsafeRPIO $ modifyMVar_ countersVRP $ \cs -> do
     return $ c : cs
   v    <- lift $ UnsafeRPIO $ newEmptyMVar -- no return value yet
-  let s = RPEState { counter = c, gCounter = gCounterRP, countersV = countersVRP }
+  let s = RPEState { counter = c, gCounter = gCounterRP
+                   , countersV = countersVRP, writerLock = writerLockRP }
   tid  <- lift $ UnsafeRPIO $ forkIO $ 
     do putMVar v =<< (runRPEIO $ flip runReaderT s $ unRPE m)
        -- in case a synchronizeRP caller already holds a reference to ctr 
@@ -269,10 +273,11 @@ readRP m = RPE $ do
 -- | Write-side critical section.
 writeRP :: RPW s a -> RPE s a
 writeRP m = RPE $ do 
-  s <- ask
+  s@(RPEState {writerLock}) <- ask
   -- run write-side critical section
-  -- TODO: add a lock (separate from counter lock) to serialize writers
-  lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ unRPW $ do
+  -- acquire a coarse-grained lock (separate from counter lock) to serialize writers
+  lift $ UnsafeRPEIO $ takeMVar writerLock
+  x <- lift $ UnsafeRPEIO $ runRPWIO $ flip runReaderT s $ unRPW $ do
     x <- m
     -- TODO: what if the RPW critical section already ends with a call to
     -- synchronizeRP?  
@@ -280,6 +285,10 @@ writeRP m = RPE $ do
     -- happens before the next critical section.
     synchronizeRP
     return x
+  -- release writer-serializing lock
+  lift $ UnsafeRPEIO $ putMVar writerLock ()
+  -- return critical section's return value
+  return x
 
 synchronizeRP :: RPW s ()
 synchronizeRP = RPW $ do
