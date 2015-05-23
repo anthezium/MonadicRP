@@ -1,10 +1,10 @@
 --{-# LANGUAGE DisambiguateRecordFields, NamedFieldPuns, Safe, TupleSections #-}
 -- TODO: figure out how to trust atomic-primops.  Do I need to build a version of it marked as Trustworthy?
 {-# LANGUAGE BangPatterns, DisambiguateRecordFields, FlexibleInstances
-           , MagicHash, NamedFieldPuns, RankNTypes 
+           , MagicHash, MultiParamTypeClasses, NamedFieldPuns, RankNTypes 
            , TupleSections, TypeSynonymInstances #-}
 module RP 
-  ( SRef(), RP(), RPE(), RPR(), RPW()
+  ( SRef(), RP(), RPE(), RPR(), RPW(), RPRead
   , ThreadState(..) 
   , newSRef, readSRef, writeSRef, copySRef
   , runRP, forkRP, joinRP, synchronizeRP, threadDelayRP, readRP, writeRP
@@ -146,14 +146,14 @@ instance Functor (RPW s) where
 
 newtype SRef s a = SRef (IORef a)
 
-class RPRead m where
+class RPRead m s where
   -- | Dereference a cell.
   readSRef :: SRef s a -> m s a
 
-instance RPRead RPR where
+instance RPRead RPR s where
   readSRef = RPR .        UnsafeRPRIO . readSRefIO 
 
-instance RPRead RPW where
+instance RPRead RPW s where
   readSRef = RPW . lift . UnsafeRPWIO . readSRefIO 
 
 readSRefIO :: SRef s a -> IO a

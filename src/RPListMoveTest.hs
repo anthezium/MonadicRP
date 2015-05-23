@@ -34,10 +34,11 @@ reader head = do
 testList :: RP s (SRef s (RPList s Char))
 testList = do
   tail <- newSRef Nil
-  c3   <- newSRef $ Cons 'D' tail
+  c4   <- newSRef $ Cons 'E' tail
+  c3   <- newSRef $ Cons 'D' c4
   c2   <- newSRef $ Cons 'C' c3
   c1   <- newSRef $ Cons 'B' c2
-  newSRef $ Cons 'A' c1
+  newSRef         $ Cons 'A' c1
 
 compactShow :: (Show a, Eq a) => [a] -> String
 compactShow xs = intercalate ", " $ map (\xs -> show (length xs) ++ " x " ++ show (head xs)) $ group xs
@@ -77,6 +78,22 @@ moveCback head = do
   -- any reader who starts during this grace period 
   -- sees either "ACBCD" or "ACBD" 
 
+moveDback :: SRef s (RPList s a) -> RPW s ()
+moveDback head = do
+  (Cons a ra)    <- readSRef head
+  -- duplicate reference to B
+  ra'            <- copySRef ra
+  (Cons b rb)    <- readSRef ra
+  (Cons c rc)    <- readSRef rb
+  (Cons d rd)    <- readSRef rc
+  ne             <- readSRef rd
+  -- link in a new D after A
+  writeSRef ra $ Cons d ra'
+  -- wait for readers
+  synchronizeRP
+  -- unlink the old D
+  writeSRef rc ne
+
 moveCbackNoSync :: SRef s (RPList s a) -> RPW s ()
 moveCbackNoSync head = do
   (Cons a rb)    <- readSRef head
@@ -106,7 +123,7 @@ main = do
     -- spawn a writer to delete the middle node
     --wt   <- forkRP $ writeRP $ moveCback head
     --wt   <- forkRP $ writeRP $ moveCbackNoSync head
-    wt   <- forkRP $ writeRP $ moveBforward head
+    wt   <- forkRP $ writeRP $ moveDback head
     --wt <- forkRP $ writeRP $ return ()
     
     -- wait for the readers to finish and print snapshots

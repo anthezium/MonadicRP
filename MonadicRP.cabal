@@ -126,3 +126,18 @@ executable RPmoveBforwardTest
     , mtl
     , transformers
 
+executable RPManyListMoveTest 
+  default-language:        Haskell2010
+  main-is:                 RPManyListMoveTest.hs
+  hs-source-dirs:          src
+  ghc-options:
+    -threaded
+    "-with-rtsopts=-N"
+  build-depends:           
+      atomic-primops
+    , base                 >= 4.6
+    , containers           >= 0.5.5.1
+    , ghc-prim
+    , mtl
+    , transformers
+
