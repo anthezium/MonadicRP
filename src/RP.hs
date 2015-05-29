@@ -18,11 +18,9 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (ReaderT(..), ask, runReaderT)
 import Data.Atomics (loadLoadBarrier, storeLoadBarrier, writeBarrier)
 import Data.Int (Int64)
-import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (delete)
 import Debug.Trace (trace)
-import GHC.Exts (MutVar#(..), Word64#(..), newMutVar#, readMutVar#, writeMutVar#, atomicModifyMutVar#) 
-import GHC.Prim (RealWorld(..), State#(..))
 
 type Counter = IORef Int64
 
@@ -191,9 +189,32 @@ writeSRef r x = updateSRef r $ const x
 -- | Compute an update and swap it into the reference cell.
 updateSRef :: SRef s a -> (a -> a) -> RPW s ()
 updateSRef (SRef r) f = RPW $ lift $ UnsafeRPWIO $ do
-  writeBarrier -- this is where urcu-pointer.c puts it
-  modifyIORef' r f
-  
+  x <- return . f =<< readIORef r
+  x `seq` writeBarrier -- make sure x is evaluated (in particular, 
+                       -- that its field writes are issued) before
+                       -- we publish a pointer to it.
+  writeIORef r x
+
+{- urcu does it like this:
+ -  void *rcu_set_pointer_sym(void **p, void *v)
+ -  {
+ -    cmm_wmb();
+ -    return uatomic_set(p, v);
+ -  }
+ -
+ - where uatomic_set(p, v) expands to: 
+ - (*(volatile typeof(p) *)&(p)) = (v)
+ - 
+ - Because field assignments are explicit and effectively in IO in C, this barrier 
+ - (which works both at the hardware and compiler level) definitely comes between the
+ - writes that populate the fields and the write that publishes the pointer.
+ - If x isn't evaluated before it's written to r, is it possible that the writes that populate its
+ - fields could be reordered with the write that publishes the pointer to the evaluated version?
+ - At least, is it possible on an architecture that reorders stores?
+ - Does GHC guarantee that when a thunk is evaluated, the pointer publication is a release write?
+ - Does GHC guarantee that when a boxed data object is loaded, the pointer load is an acquire or consume read?
+ - It seems very unlikely that GHC includes a memory barrier in either case.
+ -}
 
 -- Relativistic computations.
 
