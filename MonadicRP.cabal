@@ -2,7 +2,7 @@ name:                MonadicRP
 version:             0.0.0.1
 synopsis:            Monad abstraction for relativistic programming
 --description:         
---homepage:            https://github.com/sdiehl/kaleidoscope
+homepage:            https://github.com/anthezium/MonadicRP
 license:             GPL-3
 license-file:        LICENSE
 author:              Ted Cooper
@@ -11,15 +11,15 @@ copyright:           2015 Ted Cooper
 Category:            Concurrent
 build-type:          Simple
 cabal-version:       >=1.10
---Bug-Reports:         https://github.com/sdiehl/kaleidoscope/issues
+Bug-Reports:         https://github.com/anthezium/MonadicRP/issues
 
 --Flag Tutorial
 --  Description: Compile with pandoc preprocessor
 --  Default:     False
 
---Source-Repository head
---    Type: git
---    Location: git@github.com:sdiehl/kaleidoscope.git
+Source-Repository head
+    Type: git
+    Location: git@github.com:anthezium/MonadicRP.git
 
 library 
   exposed-modules:         RP
