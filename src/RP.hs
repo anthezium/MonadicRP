@@ -319,25 +319,24 @@ synchronizeRP = RPW $ do
   lift $ UnsafeRPWIO $ do
     storeLoadBarrier
     when (c /= offline) $ trace ("top setting writer counter offline") $ writeCounter counter offline
-  lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
-    modifyIORef' gCounter (+ counterInc)
-    --storeLoadBarrier
+  gc' <- lift $ UnsafeRPWIO $ withMVar countersV $ \counters -> do
+    gc' <- return . (+ counterInc) =<< readCounter gCounter
+    writeCounter gCounter gc'
     writeBarrier
     trace ("waiting for " ++ show (length counters) ++ " counters") $ return ()
-    forM_ counters $ waitForReader gCounter
+    let waitForReader counter = do
+          c <- readCounter counter
+          trace ("c is " ++ show c ++ ", gc' is " ++ show gc') $ return ()
+          if c /= offline && c < gc'
+             then do threadDelay 10
+                     waitForReader counter
+             else trace ("completed wait for reader, c is " ++ show c ++ ", gc' is " ++ show gc') $ return ()
+    forM_ counters $ waitForReader
+    return gc'
   lift $ UnsafeRPWIO $ do
-    when (c /= offline) $ trace ("bottom setting writer counter to gCounter") $ writeCounter counter =<< readCounter gCounter
+    when (c /= offline) $ trace ("bottom setting writer counter to gc'") $ writeCounter counter gc'
     storeLoadBarrier
   trace ("completed synchronizeRP") $ return ()
-  where waitForReader gCounter counter = do
-          c  <- readCounter counter
-          gc <- readCounter gCounter
-          trace ("c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
-          --loadLoadBarrier -- to prevent caching of reads.  will this work for that?
-          if c /= offline && c /= gc
-             then do threadDelay 10
-                     waitForReader gCounter counter
-             else trace ("completed wait for reader, c is " ++ show c ++ ", gc is " ++ show gc) $ return ()
 
 -- | Delay an RP thread.
 threadDelayRP :: Int -> RP s ()
